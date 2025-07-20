@@ -6,7 +6,7 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 import pandas as pd
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import schedule
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -27,6 +27,14 @@ CSV_FILE = "merchant_cpc_data.csv"
 USERNAME = os.getenv("USERNAME")
 PASSWORD = os.getenv("PASSWORD")
 
+# 한국 시간대 설정
+KST = timezone(timedelta(hours=9))
+
+# --- 한국시간 기준 현재 시간 반환 함수 ---
+def get_kst_now():
+    """한국시간 기준 현재 시간을 반환합니다."""
+    return datetime.now(KST)
+
 # --- 슬랙 메시지 전송 함수 ---
 def send_slack_notification(message):
     """주어진 메시지를 슬랙 채널로 전송합니다."""
@@ -42,8 +50,8 @@ def send_slack_notification(message):
 def run_crawler():
     """웹사이트를 크롤링하여 CPC 데이터를 추출하고, 결과를 요약하여 슬랙으로 전송합니다."""
     
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
+    current_date = get_kst_now().strftime("%Y-%m-%d")
+    current_datetime = get_kst_now().strftime("%Y%m%d_%H%M%S")
 
     # Chrome 옵션 설정 (Headless 모드 포함)
     chrome_options = Options()
@@ -185,9 +193,9 @@ def run_crawler():
 # --- 스케줄링 작업 함수 ---
 def job():
     """스케줄러에 의해 실행될 작업"""
-    print(f"\n--- {datetime.now()}: 정기 CPC 잔액 크롤링 시작 ---")
+    print(f"\n--- {get_kst_now()}: 정기 CPC 잔액 크롤링 시작 ---")
     run_crawler()
-    print(f"--- {datetime.now()}: 작업 완료. 다음 실행은 내일 아침 8시입니다. ---")
+    print(f"--- {get_kst_now()}: 작업 완료. 다음 실행은 내일 아침 9시입니다. ---")
 
 # --- 메인 실행 블록 ---
 if __name__ == "__main__":
@@ -201,8 +209,25 @@ if __name__ == "__main__":
     print("🚀 CPC 잔액 자동 크롤러가 시작되었습니다.")
     send_slack_notification("🚀 CPC 잔액 자동 크롤러가 시작되었습니다.")
 
-    # 매일 오전 8시에 job 함수를 실행하도록 스케줄 설정
-    schedule.every().day.at("08:00").do(job)
+    # 한국시간 기준 매일 오전 9시에 job 함수를 실행하도록 스케줄 설정
+    def schedule_job_at_kst_time():
+        """한국시간 기준으로 스케줄을 설정합니다."""
+        kst_now = get_kst_now()
+        # 다음 실행 시간을 한국시간 오전 9시로 설정
+        next_run = kst_now.replace(hour=9, minute=0, second=0, microsecond=0)
+        
+        # 만약 오늘 오전 9시가 이미 지났다면, 내일 오전 9시로 설정
+        if kst_now.time() >= next_run.time():
+            next_run = next_run + timedelta(days=1)
+        
+        # UTC 시간으로 변환하여 스케줄 설정
+        utc_time = next_run.astimezone(timezone.utc)
+        schedule.every().day.at(utc_time.strftime("%H:%M")).do(job)
+        
+        print(f"다음 크롤링 실행 예정: 한국시간 {next_run.strftime('%Y-%m-%d %H:%M')} (UTC {utc_time.strftime('%Y-%m-%d %H:%M')})")
+    
+    # 스케줄 설정
+    schedule_job_at_kst_time()
     
     # 프로그램 시작 시 1회 즉시 실행 (테스트용)
     print(">> 프로그램 시작 기념으로 작업을 1회 즉시 실행합니다...")
