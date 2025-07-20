@@ -91,41 +91,89 @@ def run_crawler():
             
         print("계약 페이지 접속 완료, 데이터 추출 시작...")
         
-        # 3. 데이터 추출
-        all_merchant_data = []
-        current_page = 1
-        has_next_page = True
+        # 3. 전체 페이지 수 확인
+        wait = WebDriverWait(driver, 10)
+        pagination = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "pagination")))
+        page_links = pagination.find_elements(By.TAG_NAME, "a")
         
-        while has_next_page:
+        # 페이지 번호 추출 (숫자만)
+        page_numbers = []
+        for link in page_links:
+            text = link.text.strip()
+            if text.isdigit():
+                page_numbers.append(int(text))
+        
+        total_pages = max(page_numbers) if page_numbers else 1
+        print(f"총 {total_pages}페이지 확인됨")
+        
+        # 4. 모든 페이지 데이터 추출
+        all_merchant_data = []
+        new_merchants = []
+        
+        for current_page in range(1, total_pages + 1):
             print(f"\n==== {current_page}번 페이지 데이터 추출 중 ====")
-            wait = WebDriverWait(driver, 10)
-            table = wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
-            rows = table.find_elements(By.TAG_NAME, "tr")
             
-            for row in rows[1:]: # 헤더 제외
-                cells = row.find_elements(By.TAG_NAME, "td")
-                if len(cells) >= 6:
-                    merchant_name = cells[2].text
-                    cpc_balance = cells[5].text.replace(",", "")
-                    all_merchant_data.append({
-                        "가맹점명": merchant_name,
-                        "CPC잔액": cpc_balance,
-                        "페이지": current_page,
-                        "추출날짜": current_date
-                    })
+            # 페이지 이동 (1페이지가 아닌 경우)
+            if current_page > 1:
+                try:
+                    # 페이지 번호 클릭
+                    page_link = driver.find_element(By.XPATH, f"//a[contains(text(), '{current_page}')]")
+                    driver.execute_script("arguments[0].click();", page_link)
+                    time.sleep(3)
+                except Exception as e:
+                    print(f"페이지 {current_page}로 이동 실패: {e}")
+                    continue
             
-            # 4. 다음 페이지로 이동
+            # 테이블 데이터 추출
             try:
-                pagination = driver.find_element(By.CLASS_NAME, "pagination")
-                next_page_link = pagination.find_element(By.XPATH, f".//a[contains(text(), '{current_page + 1}')]")
-                next_page_link.click()
-                current_page += 1
-                time.sleep(3)
-            except:
-                print("다음 페이지가 없습니다. 데이터 추출을 종료합니다.")
-                has_next_page = False
+                table = wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
+                rows = table.find_elements(By.TAG_NAME, "tr")
                 
-        # 5. 데이터 처리 및 저장
+                page_merchants = []
+                for row in rows[1:]: # 헤더 제외
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) >= 6:
+                        merchant_name = cells[2].text.strip()
+                        cpc_balance = cells[5].text.replace(",", "")
+                        
+                        if merchant_name:  # 빈 이름이 아닌 경우만
+                            merchant_data = {
+                                "가맹점명": merchant_name,
+                                "CPC잔액": cpc_balance,
+                                "페이지": current_page,
+                                "추출날짜": current_date
+                            }
+                            all_merchant_data.append(merchant_data)
+                            page_merchants.append(merchant_name)
+                            print(f"  - {merchant_name}: {cpc_balance} RMB")
+                
+                print(f"  페이지 {current_page}에서 {len(page_merchants)}개 가맹점 추출")
+                
+            except Exception as e:
+                print(f"페이지 {current_page} 데이터 추출 실패: {e}")
+                continue
+                
+        print(f"\n총 {len(all_merchant_data)}개 가맹점 데이터 추출 완료")
+        
+        # 5. 기존 데이터와 비교하여 신규 가맹점 확인
+        existing_merchants = set()
+        if os.path.exists(EXCEL_FILE):
+            try:
+                existing_df = pd.read_excel(EXCEL_FILE)
+                existing_merchants = set(existing_df['가맹점명'].unique())
+                print(f"기존 데이터에서 {len(existing_merchants)}개 가맹점 확인")
+            except Exception as e:
+                print(f"기존 데이터 읽기 실패: {e}")
+        
+        current_merchants = set([data['가맹점명'] for data in all_merchant_data])
+        new_merchants = current_merchants - existing_merchants
+        
+        if new_merchants:
+            print(f"신규 가맹점 {len(new_merchants)}개 발견: {', '.join(new_merchants)}")
+        else:
+            print("신규 가맹점 없음")
+        
+        # 6. 데이터 처리 및 저장
         if not all_merchant_data:
             summary_message = f"✅ ({current_date}) CPC 잔액 데이터 없음\n\n추출된 데이터가 없습니다."
             print(summary_message)
@@ -150,7 +198,7 @@ def run_crawler():
         df_to_save.to_excel(EXCEL_FILE, index=False, sheet_name="가맹점CPC잔액")
         print(f"총 {len(df_to_save)}개의 데이터를 파일에 저장했습니다.")
         
-        # 6. 슬랙 메시지 생성 및 전송
+        # 7. 슬랙 메시지 생성 및 전송
         today_data = df_to_save[df_to_save['추출날짜'] == current_date]
         with_balance = today_data[pd.to_numeric(today_data['CPC잔액']) > 0]
         zero_balance = today_data[pd.to_numeric(today_data['CPC잔액']) == 0]
@@ -158,14 +206,22 @@ def run_crawler():
         summary_message = (
             f"✅ *({current_date}) CPC 잔액 현황*\n\n"
             f"• 총 {len(today_data)}개 가맹점 데이터 추출\n"
-            f"• CPC 잔액 보유 가맹점: *{len(with_balance)}개*\n\n"
-            "*CPC 잔액 보유 가맹점 목록:*\n"
+            f"• CPC 잔액 보유 가맹점: *{len(with_balance)}개*\n"
         )
+        
+        # 신규 가맹점 정보 추가
+        if new_merchants:
+            summary_message += f"• 신규 가맹점: *{len(new_merchants)}개*\n"
+        
+        summary_message += "\n*CPC 잔액 보유 가맹점 목록:*\n"
         
         if not with_balance.empty:
             sorted_balance = with_balance.sort_values(by='CPC잔액', key=pd.to_numeric, ascending=False)
             for _, row in sorted_balance.iterrows():
-                summary_message += f" - {row['가맹점명']}: {int(float(row['CPC잔액'])):,} RMB\n"
+                merchant_name = row['가맹점명']
+                balance = int(float(row['CPC잔액']))
+                new_mark = " 🆕" if merchant_name in new_merchants else ""
+                summary_message += f" - {merchant_name}: {balance:,} RMB{new_mark}\n"
         else:
             summary_message += " - 없음\n"
 
@@ -173,9 +229,17 @@ def run_crawler():
         summary_message += "\n*CPC 잔액 소진완료 가맹점 목록:*\n"
         if not zero_balance.empty:
             for _, row in zero_balance.iterrows():
-                summary_message += f" - {row['가맹점명']}\n"
+                merchant_name = row['가맹점명']
+                new_mark = " 🆕" if merchant_name in new_merchants else ""
+                summary_message += f" - {merchant_name}{new_mark}\n"
         else:
             summary_message += " - 없음\n"
+        
+        # 신규 가맹점만 따로 표시
+        if new_merchants:
+            summary_message += f"\n*신규 가맹점 목록:*\n"
+            for merchant in sorted(new_merchants):
+                summary_message += f" - {merchant}\n"
         
         send_slack_notification(summary_message)
 
